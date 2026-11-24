@@ -1,3 +1,4 @@
+import Combine
 import Testing
 import Foundation
 @testable import SwiftRouting
@@ -403,6 +404,122 @@ struct BaseRouterTests {
       let foundRouter = baseRouter.findRouterInTabRouter(for: TestTabRoute.home)
 
       #expect(foundRouter?.id == expectedRouterInTab.id)
+    }
+  }
+
+  @MainActor
+  struct Dismissed {
+    @Test
+    func childRouter_notifyModalDismissed_return_sharedWithRoot() {
+      var cancellables = Set<AnyCancellable>()
+      var receivedRouter: Router?
+      let root = Router(configuration: Configuration())
+      let child = Router(root: AnyRoute(wrapped: TestRoute.home), type: .presented("sheet"), parent: root)
+      root.dismissed
+        .sink { receivedRouter = $0 }
+        .store(in: &cancellables)
+
+      child.notifyModalDismissed()
+
+      #expect(receivedRouter?.id == child.id)
+    }
+  }
+
+  @MainActor
+  struct DeepestPresentedRouter {
+    private let root = Router(configuration: Configuration())
+
+    private func makePresented(in parent: Router, sheet: Bool = true) -> Router {
+      let presented = Router(root: AnyRoute(wrapped: TestRoute.settings), type: .presented("sheet"), parent: parent)
+      if sheet { parent.present(TestRoute.settings) }
+      return presented
+    }
+
+    @Test
+    func noChildren_deepestPresentedRouter_return_self() {
+      #expect(root.deepestPresentedRouter()?.id == root.id)
+    }
+
+    @Test
+    func nestedPresentedRouters_deepestPresentedRouter_return_deepest() {
+      let first = makePresented(in: root)
+      let second = makePresented(in: first)
+
+      #expect(root.deepestPresentedRouter()?.id == second.id)
+    }
+
+    @Test
+    func dismissedPresentedRouterStillAlive_deepestPresentedRouter_return_self() {
+      let stale = makePresented(in: root)
+      root.sheet = nil
+
+      #expect(stale.isPresented)
+      #expect(root.deepestPresentedRouter()?.id == root.id)
+    }
+
+    @Test
+    func twoLivePresentedRouters_deepestPresentedRouter_return_routerMatchingSheet() {
+      // `children` is a Dictionary: repeat with fresh routers so a lucky ordering can't hide a regression.
+      for _ in 0..<20 {
+        let parent = Router(configuration: Configuration())
+        let stale = Router(root: AnyRoute(wrapped: TestRoute.home), type: .presented("home"), parent: parent)
+        let current = Router(root: AnyRoute(wrapped: TestRoute.settings), type: .presented("settings"), parent: parent)
+        parent.present(TestRoute.settings)
+
+        #expect(parent.deepestPresentedRouter()?.id == current.id)
+        #expect(parent.deepestPresentedRouter()?.id != stale.id)
+      }
+    }
+
+    @Test
+    func twoLivePresentedRouters_coverMatch_deepestPresentedRouter_return_routerMatchingCover() {
+      for _ in 0..<20 {
+        let parent = Router(configuration: Configuration())
+        let stale = Router(root: AnyRoute(wrapped: TestRoute.home), type: .presented("home"), parent: parent)
+        let current = Router(root: AnyRoute(wrapped: TestRoute.settings), type: .presented("settings"), parent: parent)
+        parent.cover(TestRoute.settings)
+
+        #expect(parent.deepestPresentedRouter()?.id == current.id)
+        #expect(parent.deepestPresentedRouter()?.id != stale.id)
+      }
+    }
+
+    @Test
+    func presentedRouterWithUpdatedRoot_deepestPresentedRouter_return_presentedRouter() {
+      let presented = Router(root: AnyRoute(wrapped: TestRoute.settings), type: .presented("settings"), parent: root)
+      root.present(TestRoute.settings)
+      presented.root = AnyRoute(wrapped: TestRoute.home)
+
+      #expect(root.deepestPresentedRouter()?.id == presented.id)
+    }
+
+    @Test
+    func presentedRouterWithoutModalState_deepestPresentedRouter_return_self() {
+      let presented = makePresented(in: root, sheet: false)
+
+      #expect(presented.isPresented)
+      #expect(root.deepestPresentedRouter()?.id == root.id)
+    }
+
+    @Test
+    func presentedRouterInSelectedTab_deepestPresentedRouter_return_presentedRouter() {
+      let tabRouter = TabRouter(tab: TestTabRoute.home, parent: root)
+      let homeRouter = Router(
+        root: AnyRoute(wrapped: TestRoute.home),
+        type: TestTabRoute.home.type,
+        parent: tabRouter
+      )
+      let settingsRouter = Router(
+        root: AnyRoute(wrapped: TestRoute.home),
+        type: TestTabRoute.settings.type,
+        parent: tabRouter
+      )
+      let presented = makePresented(in: homeRouter)
+      let otherPresented = makePresented(in: settingsRouter)
+      tabRouter.change(tab: TestTabRoute.home)
+
+      #expect(root.deepestPresentedRouter()?.id == presented.id)
+      #expect(root.deepestPresentedRouter()?.id != otherPresented.id)
     }
   }
 }

@@ -19,12 +19,17 @@ public protocol PresentationModel {
 
   /// Presents a route as a modal sheet.
   ///
+  /// If a sheet or cover of this router is still dismissing, the route is held and presented once
+  /// the dismissal ends; a newer request replaces it, and ``closeChildren()`` or ``close()`` drops it.
+  ///
   /// - Parameters:
   ///   - destination: The route to present.
   ///   - withStack: If `true`, the sheet includes its own navigation stack.
   func present(_ destination: some Route, withStack: Bool)
 
   /// Presents a route as a full-screen cover.
+  ///
+  /// Held while a sheet or cover of this router is still dismissing, like ``present(_:withStack:)``.
   ///
   /// - Parameter destination: The route to present.
   func cover(_ destination: some Route)

@@ -73,6 +73,8 @@ public final class Router: BaseRouter, @unchecked Sendable {
   @Published internal var sheet: AnyRoute? {
     didSet {
       guard oldValue != sheet else { return }
+      // Before `present.send`: an observer reacting to `false` may request the next modal right away.
+      if let oldValue, sheet == nil { beginDismissal(of: .sheet, route: oldValue) }
       present.send((sheet != nil, self))
       logCloseIfNeeded(from: oldValue, to: sheet)
     }
@@ -82,10 +84,19 @@ public final class Router: BaseRouter, @unchecked Sendable {
   @Published internal var cover: AnyRoute? {
     didSet {
       guard oldValue != cover else { return }
+      if let oldValue, cover == nil { beginDismissal(of: .cover, route: oldValue) }
       present.send((cover != nil, self))
       logCloseIfNeeded(from: oldValue, to: cover)
     }
   }
+
+  /// Kinds of modal this router has taken off screen whose dismissal SwiftUI has not reported yet.
+  /// UIKit drops a presentation requested from a view controller that is still dismissing, so
+  /// nothing is presented on this router while this is not empty.
+  private var dismissingModals: Set<ModalKind> = []
+
+  /// The latest modal requested while `dismissingModals` was not empty; presented once it empties.
+  private var pendingModal: PendingModal?
 
   /// Triggers dismissal of the current modal when set to `true`.
   @Published internal var triggerClose: Bool = false
@@ -240,26 +251,36 @@ public final class Router: BaseRouter, @unchecked Sendable {
 
 // MARK: - Presentation
 
+enum ModalKind: CaseIterable {
+  case sheet
+  case cover
+}
+
+struct PendingModal {
+  let route: AnyRoute
+  let kind: ModalKind
+}
+
 extension Router: @preconcurrency PresentationModel {
 
   @MainActor public func present(_ destination: some Route, withStack: Bool) {
-    log(.navigation(from: currentRoute.wrapped, to: destination, type: .sheet(withStack: withStack)))
-    sheet = AnyRoute(wrapped: destination, inStack: withStack)
+    requestModal(AnyRoute(wrapped: destination, inStack: withStack), kind: .sheet)
   }
 
   @MainActor public func cover(_ destination: some Route) {
-    log(.navigation(from: currentRoute.wrapped, to: destination, type: .cover))
-    cover = AnyRoute(wrapped: destination)
+    requestModal(AnyRoute(wrapped: destination), kind: .cover)
   }
 
   @MainActor public func close() {
     guard isPresented else { return }
+    pendingModal = nil
     isCloseLoggedExplicitly = true
     triggerClose = true
     log(.action(.close))
   }
 
   @MainActor public func closeChildren() {
+    pendingModal = nil
     let presentedChildren = children.values.compactMap({ $0.value as? Router }).filter(\.isPresented)
 
     guard !presentedChildren.isEmpty else { return }
@@ -273,8 +294,55 @@ extension Router: @preconcurrency PresentationModel {
 
   /// Sent by `RoutingView` and `RoutingSplitView` from their sheet and cover `onDismiss`,
   /// so both containers emit ``BaseRouter/dismissed`` the same way.
-  func notifyModalDismissed() {
+  ///
+  /// Once every dismissal in flight has been reported, a modal requested meanwhile is presented.
+  /// A `nil` kind settles all of them.
+  func notifyModalDismissed(_ kind: ModalKind? = nil) {
+    if let kind {
+      dismissingModals.remove(kind)
+    } else {
+      dismissingModals.removeAll()
+    }
+    // Observers run with nothing dismissing, so a modal they present is shown right away
+    // and, being newer, replaces the pending one.
     dismissed.send(self)
+    guard dismissingModals.isEmpty, let pending = pendingModal else { return }
+    pendingModal = nil
+    show(pending)
+  }
+
+  /// Presents `route` now, or holds it while a dismissal is in flight. A request replaces the
+  /// previous pending one: only the latest intent is presented.
+  func requestModal(_ route: AnyRoute, kind: ModalKind) {
+    let modal = PendingModal(route: route, kind: kind)
+    guard dismissingModals.isEmpty else {
+      pendingModal = modal
+      return
+    }
+    pendingModal = nil
+    show(modal)
+  }
+
+  private func show(_ modal: PendingModal) {
+    switch modal.kind {
+    case .sheet:
+      log(.navigation(from: currentRoute.wrapped, to: modal.route.wrapped, type: .sheet(withStack: modal.route.inStack)))
+      sheet = modal.route
+    case .cover:
+      log(.navigation(from: currentRoute.wrapped, to: modal.route.wrapped, type: .cover))
+      cover = modal.route
+    }
+  }
+
+  /// Tracks a dismissal only when the modal was really on screen: a live presented child router
+  /// exists once SwiftUI built it. A modal set and cleared before that gets no `onDismiss`, and
+  /// waiting for one would hold every later request forever.
+  private func beginDismissal(of kind: ModalKind, route: AnyRoute) {
+    let isOnScreen = children.values
+      .compactMap { $0.value as? Router }
+      .contains { $0.isPresented && $0.root == route }
+    guard isOnScreen else { return }
+    dismissingModals.insert(kind)
   }
 
   /// Catches dismissals that bypass `close()` entirely -- a native swipe-down, tapping outside
@@ -481,11 +549,9 @@ private extension Router {
       // Logged by `path`'s `didSet` instead -- see its comment for why.
       path.append(AnyRoute(wrapped: destination))
     case let .sheet(withStack):
-      log(.navigation(from: currentRoute.wrapped, to: destination, type: type))
-      sheet = AnyRoute(wrapped: destination, inStack: withStack)
+      requestModal(AnyRoute(wrapped: destination, inStack: withStack), kind: .sheet)
     case .cover:
-      log(.navigation(from: currentRoute.wrapped, to: destination, type: type))
-      cover = AnyRoute(wrapped: destination)
+      requestModal(AnyRoute(wrapped: destination), kind: .cover)
     case .root:
       log(.navigation(from: currentRoute.wrapped, to: destination, type: type))
       root = AnyRoute(wrapped: destination)

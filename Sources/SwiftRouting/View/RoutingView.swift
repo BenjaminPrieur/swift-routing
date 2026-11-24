@@ -121,8 +121,8 @@ public struct RoutingView<Destination: RouteDestination, Content: View>: View {
           root
         }
       }
-      .sheet($router.sheet, for: destination, onDismiss: dismiss)
-      .cover($router.cover, for: destination, onDismiss: dismiss)
+      .sheet($router.sheet, for: destination, onDismiss: { dismiss(.sheet) })
+      .cover($router.cover, for: destination, onDismiss: { dismiss(.cover) })
       .modifier(CloseModifier())
       .environment(\.router, router)
     }
@@ -146,9 +146,9 @@ public struct RoutingView<Destination: RouteDestination, Content: View>: View {
       }
     }
 
-    private func dismiss() {
+    private func dismiss(_ kind: ModalKind) {
       router.log(.onAppear(router.currentRoute.wrapped))
-      router.notifyModalDismissed()
+      router.notifyModalDismissed(kind)
     }
   }
 }
